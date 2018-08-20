@@ -3,63 +3,49 @@ package com.bstrctlmnt.job;
 import com.atlassian.confluence.pages.Page;
 import com.atlassian.confluence.pages.PageManager;
 import com.atlassian.confluence.setup.settings.SettingsManager;
-import com.atlassian.confluence.spaces.Space;
-import com.atlassian.confluence.spaces.SpaceManager;
 import com.atlassian.confluence.user.ConfluenceUser;
-import com.atlassian.confluence.user.UserAccessor;
-import com.atlassian.sal.api.user.UserManager;
-import com.atlassian.sal.api.pluginsettings.PluginSettings;
-import com.atlassian.sal.api.pluginsettings.PluginSettingsFactory;
 import com.atlassian.sal.api.transaction.TransactionTemplate;
 import com.atlassian.scheduler.JobRunner;
 import com.atlassian.scheduler.JobRunnerRequest;
 import com.atlassian.scheduler.JobRunnerResponse;
-import com.bstrctlmnt.ao.PluginDataService;
+import com.bstrctlmnt.service.PagesDAOService;
+import com.bstrctlmnt.service.PluginDataService;
 import com.bstrctlmnt.mail.PingNotification;
-import com.bstrctlmnt.servlet.Configuration;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import com.atlassian.plugin.spring.scanner.annotation.imports.ComponentImport;
 
-import java.time.Duration;
-import java.time.Instant;
+import java.sql.Timestamp;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Component
 public class PingJob implements JobRunner {
 
     private final PluginDataService pluginDataService;
+    private final PagesDAOService pagesDAOService;
+    private final PingNotification pingNotification;
 
     @ComponentImport
     private final PageManager pageManager;
     @ComponentImport
-    private final SpaceManager spaceManager;
-    @ComponentImport
     private final TransactionTemplate transactionTemplate;
     @ComponentImport
-    private final PluginSettingsFactory pluginSettingsFactory;
-    @ComponentImport
-    private final UserManager userManager;
-    @ComponentImport
     private final SettingsManager settingsManager;
-    @ComponentImport
-    private final UserAccessor userAccessor;
+
 
     @Autowired
-    public PingJob(PageManager pageManager, SpaceManager spaceManager, TransactionTemplate transactionTemplate, PluginSettingsFactory pluginSettingsFactory,
-                   UserManager userManager, SettingsManager settingsManager, UserAccessor userAccessor, PluginDataService pluginDataService) {
+    public PingJob(PageManager pageManager, TransactionTemplate transactionTemplate, SettingsManager settingsManager,
+                   PluginDataService pluginDataService, PagesDAOService pagesDAOService) {
         this.pageManager = pageManager;
-        this.spaceManager = spaceManager;
         this.transactionTemplate = transactionTemplate;
-        this.pluginSettingsFactory = pluginSettingsFactory;
-        this.userManager = userManager;
         this.settingsManager = settingsManager;
-        this.userAccessor = userAccessor;
         this.pluginDataService = pluginDataService;
+        this.pagesDAOService = pagesDAOService;
+        this.pingNotification = new PingNotification();
     }
 
     @Override
@@ -70,60 +56,58 @@ public class PingJob implements JobRunner {
 
         transactionTemplate.execute(() -> {
             //job
-            PluginSettings pluginSettings = pluginSettingsFactory.createGlobalSettings();
-            long timeframe = Long.parseLong((String) pluginSettings.get(Configuration.PLUGIN_STORAGE_KEY + ".timeframe"));
-
+            long timeframe = Long.parseLong(pluginDataService.getTimeframe());
             Set<String> affectedSpaces = pluginDataService.getAffectedSpaces();
             Set<String> groups = pluginDataService.getAffectedGroups();
-            LocalDateTime now = LocalDateTime.now();
 
             if (timeframe != 0 && affectedSpaces != null && groups != null && affectedSpaces.size() > 0 && groups.size() > 0)
             {
-                Multimap<ConfluenceUser, Page> multiMap = ArrayListMultimap.create();
+                //get expiration date
+                LocalDateTime now = LocalDateTime.now();
+                LocalDateTime requiredDate = now.minusDays(timeframe);
 
-                affectedSpaces.forEach(spaceStr -> {
-                    Space space = spaceManager.getSpace(spaceStr);
-                    List<Page> pages = pageManager.getPages(space, true);
+                //meet format in DB: "2017-03-21 09:17:10";
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm:ss");
+                Timestamp tsDate = Timestamp.valueOf(requiredDate.format(formatter));
+                List<String> outdatedPagesIds = pagesDAOService.getOutdatedPages(tsDate);
 
-                    pages.forEach(page -> {
-                        Instant instant = Instant.ofEpochMilli(page.getLastModificationDate().getTime());
-                        LocalDateTime pageLastUpdateDate = LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
-                        Duration deltaTime = Duration.between(pageLastUpdateDate, now);
-                        long delta = deltaTime.toDays();
-
+                //sort pages by creator and send email
+                if (outdatedPagesIds != null && outdatedPagesIds.size() > 0)
+                {
+                    Multimap<ConfluenceUser, Page> multiMap = ArrayListMultimap.create();
+                    outdatedPagesIds.forEach((id) -> {
+                        Page page = pageManager.getPage(Long.parseLong(id));
                         ConfluenceUser creator = page.getCreator();
-                        if (creator != null && delta > timeframe && !userAccessor.isDeactivated(creator) && checkUserMembership(creator, groups))
-                            multiMap.put(creator, page);
+                        if (creator != null) multiMap.put(creator, page);
                     });
-                });
-                createNotificationAndSendEmail(multiMap, timeframe);
+                    createNotificationAndSendEmail(multiMap, timeframe, pingNotification);
+                }
             }
             return null;
         });
         return JobRunnerResponse.success("Job finished successfully.");
     }
 
-    private boolean checkUserMembership(ConfluenceUser confluenceUser, Set<String> groups) {
-         return groups.stream().anyMatch(group -> userManager.isUserInGroup(confluenceUser.getKey(), group));
-    }
-
-    private void createNotificationAndSendEmail(Multimap<ConfluenceUser, Page> multiMap, long timeframe) {
+    private void createNotificationAndSendEmail(Multimap<ConfluenceUser, Page> multiMap, Long timeframe,
+                                                PingNotification pingNotification) {
         Set<ConfluenceUser> keys = multiMap.keySet();
 
         for (ConfluenceUser confluenceUser : keys)
         {
-            StringBuilder body = new StringBuilder();
-            Collection<Page> values = multiMap.get(confluenceUser);
+            StringBuilder links = new StringBuilder();
+            Collection<Page> pages = multiMap.get(confluenceUser);
 
-            body.append(String.format("<html><body>Dear %s,<br><br>Could you please take a look at the pages below. You are the owner of them, but looks like their content wasn't updated for a while (%d day(s)):<br>", confluenceUser.getFullName(), timeframe));
-            values.forEach(page -> {
-                body.append(String.format("<a href=\"%s/pages/viewpage.action?pageId=%s\">%s</a>", settingsManager.getGlobalSettings().getBaseUrl(), page.getId(), page.getDisplayTitle()));
-                body.append("<br>");
-            });
-            body.append("</body></html>");
+            pages.forEach((page) -> links.append("- ")
+                            .append(String.format("<a href=\"%s/pages/viewpage.action?pageId=%s\">%s</a>",
+                                    settingsManager.getGlobalSettings().getBaseUrl(), page.getId(), page.getDisplayTitle()))
+                            .append("<br>"));
 
-            PingNotification notification = new PingNotification();
-            notification.sendEmail(confluenceUser.getEmail(), "notification: It's time to review your pages", body.toString());
+            // mail variables
+            String mailbody = pluginDataService.getMailBody().replace("$creator", confluenceUser.getName())
+                    .replace("$days", timeframe.toString())
+                    .replace("$links", links.toString());
+
+            pingNotification.sendEmail(confluenceUser.getEmail(), pluginDataService.getMailSubject(), mailbody);
         }
     }
 }

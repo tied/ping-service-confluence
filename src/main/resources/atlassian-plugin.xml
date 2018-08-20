@@ -13,8 +13,12 @@
     <!-- add our web resources -->
     <web-resource key="ping-service-confluence-resources" name="ping-service-confluence Web Resources">
         <dependency>com.atlassian.auiplugin:ajs</dependency>
+        <dependency>com.atlassian.auiplugin:aui-select2</dependency>
+        <dependency>com.atlassian.auiplugin:aui-flag</dependency>
+        <resource type="download" name="ping-service.js" location="/js/ping-service.js"/>
+        <resource type="download" name="ping-service.css" location="/css/ping-service.css"/>
         <resource type="download" name="images/" location="/images"/>
-        <context>ping-service-confluence</context>
+        <context>atl.admin</context>
     </web-resource>
 
     <job-config name="Old Pages Review Service" key="pingJobConfig">
@@ -28,10 +32,6 @@
         <entity>com.bstrctlmnt.ao.AffectedSpaces</entity>
         <entity>com.bstrctlmnt.ao.AffectedGroups</entity>
     </ao>
-
-    <component key="plugin-data-service" name="Plugin Data Service" class="com.bstrctlmnt.ao.PluginDataServiceImpl">
-        <interface>com.bstrctlmnt.ao.PluginDataService</interface>
-    </component>
 
     <servlet name="Configuration Servlet" i18n-name-key="configuration-servlet.name" key="configuration-servlet"
              class="com.bstrctlmnt.servlet.Configuration">
