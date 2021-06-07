@@ -27,6 +27,16 @@
                     </select>
             </div>
 
+            <div class="field-group-ps">
+                <label for="ignoredLabels">Pages with these labels will be excluded from the search:</label>
+                <select class="multi-select" multiple="multiple" size="8" id="ignoredLabels">
+                    #foreach($label in $allLabels)
+                        <option value="$label.toString()"
+                            #if ($ignoredLabels.contains($label.toString())) selected #end>$label</option>
+                    #end
+                </select>
+            </div>
+
             <div>
                 <label for="timeframe">Period to consider pages as outdated (day(s)):
                     <input type="number" min="0" id="timeframe" class="text" value="$!timeframe">
@@ -62,6 +72,7 @@
         <div class="aui-message aui-message-info" id="message-info-ps">
                 <strong>Configuration:</strong> visit Administration - Scheduled Jobs in order to set time interval for running job or to run it manually<br>
                 <strong>Default schedule:</strong> each day at 00:00:00<br>
+                <strong>Please pay attention to the following bug related to scheduled jobs settings: </strong> <a href="https://jira.atlassian.com/browse/CONFSERVER-55455">CONFSERVER-55455</a><br>
                 <strong>Job:</strong> Old Pages Review Job<br>
                 <strong>Available variables for mail body:</strong> $creator, $days, $links<br>
         </div>

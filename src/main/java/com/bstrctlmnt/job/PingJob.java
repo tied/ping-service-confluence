@@ -1,9 +1,11 @@
 package com.bstrctlmnt.job;
 
+import com.atlassian.confluence.labels.Label;
 import com.atlassian.confluence.pages.Page;
 import com.atlassian.confluence.pages.PageManager;
 import com.atlassian.confluence.setup.settings.SettingsManager;
 import com.atlassian.confluence.user.ConfluenceUser;
+import com.atlassian.plugin.spring.scanner.annotation.export.ExportAsService;
 import com.atlassian.sal.api.transaction.TransactionTemplate;
 import com.atlassian.scheduler.JobRunner;
 import com.atlassian.scheduler.JobRunnerRequest;
@@ -13,16 +15,21 @@ import com.bstrctlmnt.service.PluginDataService;
 import com.bstrctlmnt.mail.PingNotification;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 import com.atlassian.plugin.spring.scanner.annotation.imports.ComponentImport;
 
+import javax.inject.Inject;
+import javax.inject.Named;
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 
-@Component
+@ExportAsService({PingJob.class})
+@Named("pingJob")
 public class PingJob implements JobRunner {
 
     private final PluginDataService pluginDataService;
@@ -37,7 +44,7 @@ public class PingJob implements JobRunner {
     private final SettingsManager settingsManager;
 
 
-    @Autowired
+    @Inject
     public PingJob(PageManager pageManager, TransactionTemplate transactionTemplate, SettingsManager settingsManager,
                    PluginDataService pluginDataService, PagesDAOService pagesDAOService) {
         this.pageManager = pageManager;
@@ -60,7 +67,8 @@ public class PingJob implements JobRunner {
             Set<String> affectedSpaces = pluginDataService.getAffectedSpaces();
             Set<String> groups = pluginDataService.getAffectedGroups();
 
-            if (timeframe != 0 && affectedSpaces != null && groups != null && affectedSpaces.size() > 0 && groups.size() > 0)
+            if (timeframe != 0 && affectedSpaces != null
+                    && groups != null && affectedSpaces.size() > 0 && groups.size() > 0)
             {
                 //get expiration date
                 LocalDateTime now = LocalDateTime.now();
@@ -71,6 +79,9 @@ public class PingJob implements JobRunner {
                 Timestamp tsDate = Timestamp.valueOf(requiredDate.format(formatter));
                 List<String> outdatedPagesIds = pagesDAOService.getOutdatedPages(tsDate);
 
+                //get ignored labels from DB
+                Set<String> ignoredLabelsFromDB = pluginDataService.getLabels();
+
                 //sort pages by creator and send email
                 if (outdatedPagesIds != null && outdatedPagesIds.size() > 0)
                 {
@@ -78,7 +89,15 @@ public class PingJob implements JobRunner {
                     outdatedPagesIds.forEach((id) -> {
                         Page page = pageManager.getPage(Long.parseLong(id));
                         ConfluenceUser creator = page.getCreator();
-                        if (creator != null) multiMap.put(creator, page);
+
+                        //compare page labels and ignored labels
+                        boolean isIgnored = false;
+                        if (ignoredLabelsFromDB != null && ignoredLabelsFromDB.size() > 0) {
+                            List<String> pageLabelsNames = page.getLabels().stream().map(Label::getName).collect(Collectors.toList());
+                            isIgnored = pageLabelsNames.stream().anyMatch(ignoredLabelsFromDB::contains);
+                        }
+
+                        if (creator != null && !isIgnored) multiMap.put(creator, page);
                     });
                     createNotificationAndSendEmail(multiMap, timeframe, pingNotification);
                 }
@@ -97,13 +116,19 @@ public class PingJob implements JobRunner {
             StringBuilder links = new StringBuilder();
             Collection<Page> pages = multiMap.get(confluenceUser);
 
-            pages.forEach((page) -> links.append("- ")
-                            .append(String.format("<a href=\"%s/pages/viewpage.action?pageId=%s\">%s</a>",
-                                    settingsManager.getGlobalSettings().getBaseUrl(), page.getId(), page.getDisplayTitle()))
-                            .append("<br>"));
+            pages.forEach((page) -> {
+                links.append("- ")
+                        .append(String.format("<a href=\"%s/pages/viewpage.action?pageId=%s\">%s</a>",
+                                settingsManager.getGlobalSettings().getBaseUrl(), page.getId(), page.getDisplayTitle()))
+                        .append(" (last modified: ");
+                Instant instant = page.getLastModificationDate().toInstant();
+                LocalDate localDate = instant.atOffset(ZoneOffset.UTC).toLocalDate();
+                links.append(localDate)
+                        .append(")<br>");
+            });
 
             // mail variables
-            String mailbody = pluginDataService.getMailBody().replace("$creator", confluenceUser.getName())
+            String mailbody = pluginDataService.getMailBody().replace("$creator", confluenceUser.getFullName())
                     .replace("$days", timeframe.toString())
                     .replace("$links", links.toString());
 

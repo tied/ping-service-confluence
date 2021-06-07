@@ -1,10 +1,4 @@
-SELECT
-  c.contentid,
-  c.contenttype,
-  sp.spacekey,
-  c.creator,
-  c.lastmodifier,
-  c.lastmoddate
+SELECT DISTINCT c.contentid
 FROM content c
   INNER JOIN spaces sp
     ON sp.spaceid = c.spaceid
